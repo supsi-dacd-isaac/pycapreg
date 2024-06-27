@@ -276,7 +276,7 @@ class _BaseCAPRegressor(RegressorMixin, BaseEstimator):
 
             return winning_copy
 
-    def lintree_round(self, X, y, part_x, part_y, part_sw, stolen):
+    def lintree_round(self, X, y, part_x, part_y, part_sw, skip_list):
 
         # generate candidate splits, record best
         winning_score = self.score_fn[0](y, self.predict(X))
@@ -285,7 +285,7 @@ class _BaseCAPRegressor(RegressorMixin, BaseEstimator):
         for pno, Xp in part_x.items():
 
             # check that the partition satisfies the minimum leaf samples
-            assert Xp.shape[0] >= min(self.min_leaf_samples, X.shape[0]) or pno in stolen.keys(), \
+            assert Xp.shape[0] >= min(self.min_leaf_samples, X.shape[0]) or pno in skip_list, \
                 "Min leaf samples violated. This might suggest a problem with the dependency linear-tree."
 
             # not enough samples in this partition

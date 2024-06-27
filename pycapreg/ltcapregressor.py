@@ -45,13 +45,13 @@ class LTCAPRegressor(_BaseCAPRegressor):
                 ),
                 FitFailedWarning)
 
-        frozen_subsets = {}
+        skipped_planes = []
         for _nit in self._generate_iterations_number():
             # obtain the partitioning induced by the current hyperplanes
             part_x, part_y, part_sw = self.partition_data(X, y, sample_weight)
 
             # perform a round of lintree split
-            winning_copy = self.lintree_round(X, y, part_x, part_y, part_sw, frozen_subsets)
+            winning_copy = self.lintree_round(X, y, part_x, part_y, part_sw, skipped_planes)
 
             # if lintree split did not achieve an improvement, try a classic cap
             if winning_copy is None and self.attempt_full_cap_on_stop:
@@ -74,7 +74,7 @@ class LTCAPRegressor(_BaseCAPRegressor):
 
             # refit
             for _ in range(self.refit_rounds):
-                _skipped_planes = self.refit_current_hyperplanes(X, y, sample_weight=sample_weight)
+                skipped_planes = self.refit_current_hyperplanes(X, y, sample_weight=sample_weight)
 
             # purge planes with no leaves
             self.purge_dead_hyperplanes(X, y)
