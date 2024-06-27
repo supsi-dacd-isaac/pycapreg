@@ -50,67 +50,13 @@ def _leaves(linear_tree_regr):
     return leaves
 
 
-def _dump_models(linear_tree_regr, X, y, sw):
+def _dump_models(linear_tree_regr):
     s = linear_tree_regr.summary()
     leaves = _leaves(linear_tree_regr)
-    selection = linear_tree_regr.apply(X)
     model_names = {l: uuid4().hex for l in leaves}
     models = {model_names[l]: s[l]['models'] for l in leaves}
-    data_split = {model_names[l]:
-                        (X[selection == l, :],
-                         y[selection == l],
-                         sw[selection == l])
-                    for l in leaves}
-    return models, data_split
 
-
-def _subsets_to_freeze(old_cap, new_cap, X, y, sw, min_leaf, old_frozen, data_split):
-    # this function checks if some hyperplanes have fewer points than the minimum allowed
-    # following a split (and possibly a refit), and if so it saves their last
-    # valid dataset in a "frozen subsets" dictionary that is used when the model is refit.
-
-    old_ids = set(old_cap.hyperplanes_ids_)
-    new_ids = set(new_cap.hyperplanes_ids_)
-
-    deleted_hp = old_ids - new_ids
-    introduced_ids = new_ids - old_ids
-    assert len(deleted_hp) == 1
-    deleted_hp = list(deleted_hp)[0]
-
-    old_ids.remove(deleted_hp)
-
-    old_part_x, old_part_y, old_part_sw = old_cap.partition_data(X, y)
-    new_part_x, new_part_y, new_part_sw = new_cap.partition_data(X, y)
-
-    frozen_subsets = {}
-
-    # check the old hyperplanes
-    for part_id in old_ids:
-        if new_part_x[part_id].shape[0] >= min_leaf:
-            # this partition has no problems
-            continue
-        elif part_id in old_frozen.keys():
-            # if the partition is underweight but was already frozen,
-            # just carry on the frozen subset
-            frozen_subsets[part_id] = old_frozen[part_id]
-        else:
-            # this hyperplane became underweight after the split so we save its data
-            frozen_subsets[part_id] = (old_part_x[part_id], old_part_y[part_id], old_part_sw[part_id])
-
-    # the introduced planes might be underweight as well. if so, they are
-    # assigned the subset of points they were given by the splitter.
-    # this happens only on a successful lintree round whose new hyperplanes
-    # happen to have points "stolen" by old hyperplanes; if a combinatorial round was
-    # performed, the introduced planes must not be underweight, because underweight
-    # splits are discarded.
-    for part_id in introduced_ids:
-        if data_split is None:
-            assert new_part_x[part_id].shape[0] > min_leaf
-        else:
-            if new_part_x[part_id].shape[0] < min_leaf:
-                frozen_subsets[part_id] = data_split[part_id]
-
-    return frozen_subsets
+    return models
 
 
 class _BaseCAPRegressor(RegressorMixin, BaseEstimator):
@@ -120,7 +66,6 @@ class _BaseCAPRegressor(RegressorMixin, BaseEstimator):
             self,
             concavity='convex',
             min_leaf_samples=3,
-            attempt_full_cap_on_stop=False,
             save_model_sequence=False,
             score_fn=(mean_squared_error, 'lower'),
             refit_rounds=1,
@@ -152,7 +97,7 @@ class _BaseCAPRegressor(RegressorMixin, BaseEstimator):
                 'non_deterministic': False,
                 'requires_fit': True}
 
-    def _initial_fit(self, X, y, sample_weight=None):
+    def _make_initial_hyperplane(self, X, y, sample_weight=None):
         """Fits a single regressor on the data and sets it
         as the first hyperplane"""
         est = deepcopy(self.underlying_estimator)
@@ -185,9 +130,9 @@ class _BaseCAPRegressor(RegressorMixin, BaseEstimator):
             raise ValueError('Invalid iteration limit, please check.')
 
     @staticmethod
-    def _check_constraint_satisfaction(capregressor, X, y, stolen):
+    def _check_constraint_satisfaction(capregressor, X, y, skiplist):
         test_part_x, test_part_y, _ = capregressor.partition_data(X, y)
-        samples_constraint_satisfied = all([x.shape[0] >= capregressor.min_leaf_samples or pno in stolen for pno, x in test_part_x.items()])
+        samples_constraint_satisfied = all([x.shape[0] >= capregressor.min_leaf_samples or pno in skiplist for pno, x in test_part_x.items()])
         return samples_constraint_satisfied
 
     def purge_dead_hyperplanes(self, X, y):
@@ -245,31 +190,38 @@ class _BaseCAPRegressor(RegressorMixin, BaseEstimator):
 
         return xpart, ypart, swpart
 
-    def refit_current_hyperplanes(self, X, y, stolen, sample_weight=None):
+    def refit_current_hyperplanes(self, X, y, sample_weight=None):
         """Refits new hyperplanes in place according to the partitions induced by
         the current hyperplanes."""
 
         part_x, part_y, part_sw = self.partition_data(X, y, sample_weight)
         new_hyperplanes = []
+        skiplist = []
         for pno, Xp in part_x.items():
-            yp = part_y[pno]
-            sw = part_sw[pno] if sample_weight is not None else None
-            if len(yp) < self.min_leaf_samples:
-                Xp, yp, sw = stolen[pno]
-            sm = deepcopy(self.underlying_estimator)
-            sm.fit(Xp, yp, sample_weight=sw)
-            new_hyperplanes.append(sm)
+            if Xp.shape[0] < self.min_leaf_samples:
+                # plane is skipped
+                hp_index = self.hyperplanes_ids_.index(pno)
+                new_hyperplanes.append(self.hyperplanes_[hp_index])
+                skiplist.append(pno)
+            else:
+                yp = part_y[pno]
+                sw = part_sw[pno] if sample_weight is not None else None
+                sm = deepcopy(self.underlying_estimator)
+                sm.fit(Xp, yp, sample_weight=sw)
+                new_hyperplanes.append(sm)
 
-        # verify that the refit model does not violate the min samples per leaf constraint
-        # otherwise skip the refit, as per the paper
+        # verify that the refit model does not introduce new violations to the min samples per leaf constraint
+        # otherwise skip the refit
         test_copy = deepcopy(self)
         test_copy.hyperplanes_ = new_hyperplanes
-        samples_constraint_satisfied = self._check_constraint_satisfaction(test_copy, X, y, stolen)
+        samples_constraint_satisfied = self._check_constraint_satisfaction(test_copy, X, y, skiplist)
 
         # no need to update hyperplanes_ids_, as the new
         # hyperplanes are just refit version of the current ones
         if samples_constraint_satisfied:
             self.hyperplanes_ = new_hyperplanes
+
+        return skiplist
 
     def combinatorial_round(self, X, y, part_x, part_y, part_sw):
 
@@ -330,7 +282,6 @@ class _BaseCAPRegressor(RegressorMixin, BaseEstimator):
         winning_score = self.score_fn[0](y, self.predict(X))
         _winning_pno = None
         winning_copy = None
-        winning_data_split = None
         for pno, Xp in part_x.items():
 
             # check that the partition satisfies the minimum leaf samples
@@ -350,7 +301,6 @@ class _BaseCAPRegressor(RegressorMixin, BaseEstimator):
                 min_samples_leaf=self.min_leaf_samples,
             )
             psw = _check_sample_weight(part_sw[pno], part_x[pno])
-            psw += 1e-12
             splitter.fit(Xp, yp, sample_weight=psw)
 
             # splitter did not divide the partition
@@ -365,7 +315,7 @@ class _BaseCAPRegressor(RegressorMixin, BaseEstimator):
             kill_index = test_copy.hyperplanes_ids_.index(pno)
             del test_copy.hyperplanes_[kill_index]
             del test_copy.hyperplanes_ids_[kill_index]
-            split_models, data_split = _dump_models(splitter, Xp, part_y[pno], part_sw[pno])
+            split_models = _dump_models(splitter)
             for model_name, model in split_models.items():
                 test_copy.hyperplanes_.append(model)
                 test_copy.hyperplanes_ids_.append(model_name)
@@ -390,14 +340,22 @@ class _BaseCAPRegressor(RegressorMixin, BaseEstimator):
                 winning_score = score_of_split
                 _winning_pno = pno
                 winning_copy = test_copy
-                winning_data_split = data_split
 
-        return winning_copy, winning_data_split
+        return winning_copy
 
-    def prefit(self, X, y, sample_weight):
+    def _prefit(self, X, y, sample_weight):
+        """Initial chores common to all fit procedures"""
+
         # data validation
         X, y = self._validate_data(X, y)
         sample_weight = _check_sample_weight(sample_weight, X)
+
+        # eliminate samples with zero weight to sidestep problems when
+        # the data is split in subset
+        used_samples = sample_weight != 0.0
+        X = X[used_samples, :]
+        y = y[used_samples]
+        sample_weight = sample_weight[used_samples]
 
         # define/reset the fitted attributes
         self.hyperplanes_ = []  # pylint: disable=attribute-defined-outside-init
@@ -405,7 +363,7 @@ class _BaseCAPRegressor(RegressorMixin, BaseEstimator):
         self.model_sequence_ = []  # pylint: disable=attribute-defined-outside-init
 
         # initial fit with one hyperplane
-        self._initial_fit(X, y)
+        self._make_initial_hyperplane(X, y)
 
         return X, y, sample_weight
 

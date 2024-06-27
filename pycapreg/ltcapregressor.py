@@ -4,7 +4,7 @@ from warnings import warn
 from sklearn.exceptions import FitFailedWarning
 from sklearn.metrics import mean_squared_error
 
-from .basecapregressor import _BaseCAPRegressor, FEW_SAMPLES_MSG, IT_LIM_HIT_MSG, _subsets_to_freeze
+from .basecapregressor import _BaseCAPRegressor, FEW_SAMPLES_MSG, IT_LIM_HIT_MSG
 
 
 class LTCAPRegressor(_BaseCAPRegressor):
@@ -33,7 +33,7 @@ class LTCAPRegressor(_BaseCAPRegressor):
 
     def fit(self, X, y, sample_weight=None):
         # data validation
-        X, y, sample_weight = self.prefit(X, y, sample_weight)
+        X, y, sample_weight = self._prefit(X, y, sample_weight)
 
         # warning in case of very few samples
         if X.shape[0] < 2*self.min_leaf_samples:
@@ -51,7 +51,7 @@ class LTCAPRegressor(_BaseCAPRegressor):
             part_x, part_y, part_sw = self.partition_data(X, y, sample_weight)
 
             # perform a round of lintree split
-            winning_copy, winning_data_split = self.lintree_round(X, y, part_x, part_y, part_sw, frozen_subsets)
+            winning_copy = self.lintree_round(X, y, part_x, part_y, part_sw, frozen_subsets)
 
             # if lintree split did not achieve an improvement, try a classic cap
             if winning_copy is None and self.attempt_full_cap_on_stop:
@@ -64,7 +64,7 @@ class LTCAPRegressor(_BaseCAPRegressor):
 
             # if any hyperplanes fall under the minimum leaf requirement,
             # freeze the subsets they are currently fit on
-            frozen_subsets = _subsets_to_freeze(self, winning_copy, X, y, sample_weight, self.min_leaf_samples, frozen_subsets, winning_data_split)
+            # frozen_subsets = _subsets_to_freeze(self, winning_copy, X, y, sample_weight, self.min_leaf_samples, frozen_subsets)
 
             # split the winning partition.
             # partition numbers have the same order as the hyperplanes they are induced by.
@@ -74,7 +74,7 @@ class LTCAPRegressor(_BaseCAPRegressor):
 
             # refit
             for _ in range(self.refit_rounds):
-                self.refit_current_hyperplanes(X, y, frozen_subsets, sample_weight=sample_weight)
+                _skipped_planes = self.refit_current_hyperplanes(X, y, sample_weight=sample_weight)
 
             # purge planes with no leaves
             self.purge_dead_hyperplanes(X, y)

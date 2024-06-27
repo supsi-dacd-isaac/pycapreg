@@ -8,7 +8,7 @@ from .basecapregressor import _BaseCAPRegressor, IT_LIM_HIT_MSG, warn
 class ClCAPRegressor(_BaseCAPRegressor):
 
     def fit(self, X, y, sample_weight=None):
-        self.prefit(X, y, sample_weight)
+        X, y, sample_weight = self._prefit(X, y, sample_weight)
 
         for _nit in self._generate_iterations_number():
             part_x, part_y, part_sw = self.partition_data(X, y, sample_weight)
@@ -26,7 +26,10 @@ class ClCAPRegressor(_BaseCAPRegressor):
 
             # refit
             for _ in range(self.refit_rounds):
-                self.refit_current_hyperplanes(X, y, {})
+                skipped_planes = self.refit_current_hyperplanes(X, y, sample_weight=sample_weight)
+                assert not skipped_planes
+                # planes are skipped if they ended up underweight in the previous iteration.
+                # this must not happen with only combinatorial rounds.
 
             if self.save_model_sequence:
                 self.model_sequence_.append(deepcopy(self))
