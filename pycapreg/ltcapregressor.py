@@ -13,6 +13,7 @@ class LTCAPRegressor(_BaseCAPRegressor):
             self,
             concavity='convex',
             min_leaf_samples=3,
+            break_if_no_improvement=True,
             attempt_full_cap_on_stop=False,
             save_model_sequence=False,
             score_fn=(mean_squared_error, 'lower'),
@@ -23,6 +24,7 @@ class LTCAPRegressor(_BaseCAPRegressor):
         super().__init__(
                 concavity=concavity,
                 min_leaf_samples=min_leaf_samples,
+                break_if_no_improvement=break_if_no_improvement,
                 save_model_sequence=save_model_sequence,
                 score_fn=score_fn,
                 refit_rounds=refit_rounds,
@@ -36,12 +38,12 @@ class LTCAPRegressor(_BaseCAPRegressor):
         X, y, sample_weight = self._prefit(X, y, sample_weight)
 
         # warning in case of very few samples
-        if X.shape[0] < 2*self.min_leaf_samples:
+        if X.shape[0] < 2*self.get_min_samples(X):
             warn(
                 FEW_SAMPLES_MSG.format(
-                    min_leaf_samples=self.min_leaf_samples,
+                    min_leaf_samples=self.get_min_samples(X),
                     nsamples=X.shape[0],
-                    nsamples2=2*self.min_leaf_samples
+                    nsamples2=2*self.get_min_samples(X)
                 ),
                 FitFailedWarning)
 
@@ -49,6 +51,10 @@ class LTCAPRegressor(_BaseCAPRegressor):
         for _nit in self._generate_iterations_number():
             # obtain the partitioning induced by the current hyperplanes
             part_x, part_y, part_sw = self.partition_data(X, y, sample_weight)
+
+            # break if all partitions cannot be divided
+            if all([len(y) < self.get_min_samples(X) for y in part_y.values()]):
+                break
 
             # perform a round of lintree split
             winning_copy = self.lintree_round(X, y, part_x, part_y, part_sw, skipped_planes)
@@ -64,7 +70,7 @@ class LTCAPRegressor(_BaseCAPRegressor):
 
             # if any hyperplanes fall under the minimum leaf requirement,
             # freeze the subsets they are currently fit on
-            # frozen_subsets = _subsets_to_freeze(self, winning_copy, X, y, sample_weight, self.min_leaf_samples, frozen_subsets)
+            # frozen_subsets = _subsets_to_freeze(self, winning_copy, X, y, sample_weight, self.get_min_samples(X, frozen_subsets)
 
             # split the winning partition.
             # partition numbers have the same order as the hyperplanes they are induced by.
@@ -76,14 +82,14 @@ class LTCAPRegressor(_BaseCAPRegressor):
             for _ in range(self.refit_rounds):
                 skipped_planes = self.refit_current_hyperplanes(X, y, sample_weight=sample_weight)
 
-            # purge planes with no leaves
-            self.purge_dead_hyperplanes(X, y)
-
             if self.save_model_sequence:
                 self.model_sequence_.append(deepcopy(self))
 
         else:
             # fitting did not end naturally
             warn(IT_LIM_HIT_MSG, FitFailedWarning)
+
+        # purge planes with no leaves
+        self.purge_dead_hyperplanes(X, y)
 
         return self

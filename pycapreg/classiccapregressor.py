@@ -12,6 +12,12 @@ class ClCAPRegressor(_BaseCAPRegressor):
 
         for _nit in self._generate_iterations_number():
             part_x, part_y, part_sw = self.partition_data(X, y, sample_weight)
+
+            # break if all partitions cannot be divided
+            if all([len(y) < self.get_min_samples(X) for y in part_y.values()]):
+                break
+
+            # do round
             winning_copy = self.combinatorial_round(X, y, part_x, part_y, part_sw)
             if winning_copy is None:
                 # no candidate split has beaten the current model.

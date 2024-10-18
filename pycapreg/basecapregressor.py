@@ -15,6 +15,8 @@ CONVEX = 'convex'
 MIN = 'concave'
 MAX = 'convex'
 
+AUTOMATIC_MIN_LEAF = 'auto'
+
 LOWER_BETTER = 'lower'
 HIGHER_BETTER = 'higher'
 
@@ -61,11 +63,13 @@ def _dump_models(linear_tree_regr):
 
 class _BaseCAPRegressor(RegressorMixin, BaseEstimator):
     underlying_estimator = LinearRegression(fit_intercept=True)
+    D = 3
 
     def __init__(
             self,
             concavity='convex',
-            min_leaf_samples=3,
+            min_leaf_samples='auto',
+            break_if_no_improvement=True,
             save_model_sequence=False,
             score_fn=(mean_squared_error, 'lower'),
             refit_rounds=1,
@@ -87,10 +91,19 @@ class _BaseCAPRegressor(RegressorMixin, BaseEstimator):
 
         self.concavity = concavity
         self.score_fn = score_fn
+        self.break_if_no_improvement = break_if_no_improvement
         self.save_model_sequence = save_model_sequence
-        self.min_leaf_samples = int(min_leaf_samples)
+        self.min_leaf_samples = min_leaf_samples
         self.refit_rounds = refit_rounds
         self.emergency_iteration_limit = int(emergency_iteration_limit)
+
+    def get_min_samples(self, X):
+        if self.min_leaf_samples == AUTOMATIC_MIN_LEAF:
+            N = X.shape[0]
+            d = X.shape[1]
+            return min(2*(d + 1), N/(self.D*np.log(N)))
+        else:
+            return int(self.min_leaf_samples)
 
     def _more_tags(self):
         return {'poor_score': True,
@@ -110,9 +123,9 @@ class _BaseCAPRegressor(RegressorMixin, BaseEstimator):
         (lower/higher better) according to self.score_fn"""
 
         if self.score_fn[1] == LOWER_BETTER:
-            return score < baseline
+            return score <= baseline
         elif self.score_fn[1] == HIGHER_BETTER:
-            return score > baseline
+            return score >= baseline
         else:
             raise ValueError(f"Score mode {self.score_fn[1]} is not valid. "
                              f"It should be one of '{LOWER_BETTER}'/'{HIGHER_BETTER}'")
@@ -132,7 +145,7 @@ class _BaseCAPRegressor(RegressorMixin, BaseEstimator):
     @staticmethod
     def _check_constraint_satisfaction(capregressor, X, y, skiplist):
         test_part_x, test_part_y, _ = capregressor.partition_data(X, y)
-        samples_constraint_satisfied = all([x.shape[0] >= capregressor.min_leaf_samples or pno in skiplist for pno, x in test_part_x.items()])
+        samples_constraint_satisfied = all([x.shape[0] >= capregressor.get_min_samples(X) or pno in skiplist for pno, x in test_part_x.items()])
         return samples_constraint_satisfied
 
     def purge_dead_hyperplanes(self, X, y):
@@ -198,7 +211,7 @@ class _BaseCAPRegressor(RegressorMixin, BaseEstimator):
         new_hyperplanes = []
         skiplist = []
         for pno, Xp in part_x.items():
-            if Xp.shape[0] < self.min_leaf_samples:
+            if Xp.shape[0] < self.get_min_samples(X):
                 # plane is skipped
                 hp_index = self.hyperplanes_ids_.index(pno)
                 new_hyperplanes.append(self.hyperplanes_[hp_index])
@@ -225,7 +238,10 @@ class _BaseCAPRegressor(RegressorMixin, BaseEstimator):
 
     def combinatorial_round(self, X, y, part_x, part_y, part_sw):
 
-        winning_score = self.score_fn[0](y, self.predict(X))
+        if self.break_if_no_improvement:
+            winning_score = self.score_fn[0](y, self.predict(X))
+        else:
+            winning_score = np.inf * (-1 * (self.score_fn[1] == HIGHER_BETTER))
         _winning_pno = None
         winning_copy = None
 
@@ -279,17 +295,20 @@ class _BaseCAPRegressor(RegressorMixin, BaseEstimator):
     def lintree_round(self, X, y, part_x, part_y, part_sw, skip_list):
 
         # generate candidate splits, record best
-        winning_score = self.score_fn[0](y, self.predict(X))
+        if self.break_if_no_improvement:
+            winning_score = self.score_fn[0](y, self.predict(X))
+        else:
+            winning_score = np.inf * (-1 * (self.score_fn[1] == HIGHER_BETTER))
         _winning_pno = None
         winning_copy = None
         for pno, Xp in part_x.items():
 
             # check that the partition satisfies the minimum leaf samples
-            assert Xp.shape[0] >= min(self.min_leaf_samples, X.shape[0]) or pno in skip_list, \
+            assert Xp.shape[0] >= min(self.get_min_samples(X), X.shape[0]) or pno in skip_list, \
                 "Min leaf samples violated. This might suggest a problem with the dependency linear-tree."
 
             # not enough samples in this partition
-            if Xp.shape[0] < 2 * self.min_leaf_samples:
+            if Xp.shape[0] < 2 * self.get_min_samples(X):
                 continue
 
             # train a LinearTreeRegressor with depth 1 (a splitter)
@@ -298,7 +317,7 @@ class _BaseCAPRegressor(RegressorMixin, BaseEstimator):
             splitter = LinearTreeRegressor(
                 base_estimator=self.underlying_estimator,
                 max_depth=1,
-                min_samples_leaf=self.min_leaf_samples,
+                min_samples_leaf=self.get_min_samples(X),
             )
             psw = _check_sample_weight(part_sw[pno], part_x[pno])
             splitter.fit(Xp, yp, sample_weight=psw)
@@ -307,7 +326,7 @@ class _BaseCAPRegressor(RegressorMixin, BaseEstimator):
             if len(_leaves(splitter)) < 2:
                 continue
 
-            assert all([x['samples'] >= self.min_leaf_samples for x in splitter.summary().values()])
+            assert all([x['samples'] >= self.get_min_samples(X) for x in splitter.summary().values()])
             assert len(_leaves(splitter)) == 2, "Problem with tree depth"
 
             # make a test copy with the split implemented
